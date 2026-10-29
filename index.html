@@ -1,0 +1,317 @@
+
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1">
+  <title>DPD LIVE Adresse Scanner</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 15px;
+      font-family: Arial, sans-serif;
+      background: #f1f4f8;
+      color: #243246;
+    }
+
+    .container {
+      max-width: 600px;
+      margin: auto;
+      background: white;
+      padding: 18px;
+      border-radius: 14px;
+    }
+
+    h2 { color: #d71930; }
+
+    video {
+      width: 100%;
+      border-radius: 10px;
+      background: #111;
+    }
+
+    label {
+      display: block;
+      margin-top: 12px;
+      font-weight: bold;
+    }
+
+    input {
+      width: 100%;
+      padding: 12px;
+      font-size: 16px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+    }
+
+    button {
+      width: 100%;
+      padding: 14px;
+      margin-top: 12px;
+      border: 0;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+
+    .primary {
+      background: #d71930;
+      color: white;
+      font-weight: bold;
+    }
+
+    .dark {
+      background: #243b53;
+      color: white;
+    }
+
+    #status {
+      margin-top: 12px;
+      font-size: 14px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+
+<body>
+<div class="container">
+
+  <h2>📷 DPD LIVE Adresse Scanner</h2>
+  <p>Samsung & iPhone</p>
+
+  <video id="video" autoplay playsinline muted></video>
+
+  <button class="dark" onclick="kameraStarten()">
+    📷 Kamera starten
+  </button>
+
+  <button class="primary" onclick="adresseScannen()">
+    🔎 Adresse lesen
+  </button>
+
+  <canvas id="canvas" style="display:none"></canvas>
+
+  <label>Name / Firma</label>
+  <input id="name">
+
+  <label>Strasse / Nr.</label>
+  <input id="strasse">
+
+  <label>PLZ</label>
+  <input id="plz">
+
+  <label>Ort</label>
+  <input id="ort">
+
+  <button class="primary" onclick="adresseBestaetigen()">
+    ✅ Bestätigen
+  </button>
+
+  <div id="status"></div>
+
+</div>
+
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+
+let stream = null;
+let busy = false;
+
+function statusSetzen(text) {
+  $("status").textContent = text;
+}
+
+async function kameraStarten() {
+  try {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+    }
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      }
+    });
+
+    $("video").srcObject = stream;
+    await $("video").play();
+
+    statusSetzen("Kamera bereit.");
+  } catch (error) {
+    statusSetzen("Kamera-Fehler: " + error.message);
+  }
+}
+
+function adresseAnalysieren(text) {
+  const zeilen = text
+    .split(/\r?\n/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const result = {
+    name: "",
+    strasse: "",
+    plz: "",
+    ort: ""
+  };
+
+  let plzIndex = -1;
+  let strasseIndex = -1;
+
+  for (let i = 0; i < zeilen.length; i++) {
+    const match = zeilen[i].match(
+      /^(?:CH-|DE-|D-)?(\d{4,5})\s+(.+)$/i
+    );
+
+    if (match) {
+      result.plz = match[1];
+      result.ort = match[2];
+      plzIndex = i;
+      break;
+    }
+  }
+
+  const streetPattern =
+    /\b(strasse|straße|str\.?|weg|gasse|platz|allee|ring|rue|route|chemin|avenue|via)\b/i;
+
+  const ende = plzIndex >= 0 ? plzIndex : zeilen.length;
+
+  for (let i = 0; i < ende; i++) {
+    if (
+      streetPattern.test(zeilen[i]) ||
+      /[A-Za-zÀ-ÿ].*\d{1,4}[a-z]?\s*$/i.test(zeilen[i])
+    ) {
+      result.strasse = zeilen[i];
+      strasseIndex = i;
+      break;
+    }
+  }
+
+  if (strasseIndex > 0) {
+    result.name = zeilen
+      .slice(Math.max(0, strasseIndex - 2), strasseIndex)
+      .filter(s => !/^(absender|empfänger|sender|recipient)$/i.test(s))
+      .join(" ");
+  } else if (zeilen.length) {
+    result.name = zeilen[0];
+  }
+
+  return result;
+}
+
+async function adresseScannen() {
+  if (busy) return;
+
+  const video = $("video");
+
+  if (!stream || !video.videoWidth) {
+    statusSetzen("Bitte zuerst Kamera starten.");
+    return;
+  }
+
+  busy = true;
+
+  try {
+    statusSetzen("Adresse wird gelesen...");
+
+    const canvas = $("canvas");
+    const maxWidth = 1800;
+    const scale = Math.min(
+      1,
+      maxWidth / video.videoWidth
+    );
+
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const worker = await Tesseract.createWorker("deu");
+
+    try {
+      const response = await worker.recognize(canvas);
+      const text = response.data.text || "";
+
+      if (!text.trim()) {
+        throw new Error("Kein Text erkannt.");
+      }
+
+      const adresse = adresseAnalysieren(text);
+
+      $("name").value = adresse.name;
+      $("strasse").value = adresse.strasse;
+      $("plz").value = adresse.plz;
+      $("ort").value = adresse.ort;
+
+      statusSetzen(
+        "Adresse erkannt. Bitte alle Felder kontrollieren."
+      );
+    } finally {
+      await worker.terminate();
+    }
+  } catch (error) {
+    statusSetzen("OCR-Fehler: " + error.message);
+  } finally {
+    busy = false;
+  }
+}
+
+function adresseBestaetigen() {
+  const adresse = {
+    name: $("name").value.trim(),
+    strasse: $("strasse").value.trim(),
+    plz: $("plz").value.trim(),
+    ort: $("ort").value.trim()
+  };
+
+  if (!adresse.name) {
+    statusSetzen("Bitte Name / Firma eingeben.");
+    return;
+  }
+
+  if (!window.opener) {
+    statusSetzen(
+      "EPS-Verbindung fehlt. Scanner bitte direkt aus EPS öffnen."
+    );
+    return;
+  }
+
+  window.opener.postMessage(
+    {
+      type: "DPD_ADRESSE_SCAN_V1",
+      address: adresse
+    },
+    "*"
+  );
+
+  statusSetzen(
+    "Adresse gesendet. Bitte zum EPS-Formular zurückkehren."
+  );
+
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+  }
+}
+
+window.addEventListener("load", kameraStarten);
+
+window.addEventListener("pagehide", () => {
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+  }
+});
+</script>
+</body>
+</html>
